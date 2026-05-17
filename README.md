@@ -122,6 +122,7 @@ await fw.stop()
 | `writeInLastChatMessageContaining(cardSelector, inputSelector, value)` | Sets the value of an input inside the last chat message containing `cardSelector` and dispatches a `change` event. |
 | `clickInLastChatMessageContaining(cardSelector, selector)` | Clicks `selector` inside the last chat message that contains `cardSelector`. |
 | `clickInLastChatMessageByText(text)` | Clicks the element whose trimmed text content equals `text` inside the most recent chat message. |
+| `rightClickLastChatMessage(itemText)` | Right-clicks the last chat message to open its context menu, then clicks the item whose span text equals `itemText`. |
 | `selectTokensByName(names)` | Targets tokens on the active scene by display name (clears previous targets). Throws if any name is not found. |
 | `getActorFromTokenByName(name)` | Finds a token by display name on the active scene and returns the actor's plain data object (`actor.toObject()`) with `tokenUuid` merged in. |
 

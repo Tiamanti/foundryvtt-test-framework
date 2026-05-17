@@ -241,6 +241,32 @@ export class FoundryTestFramework {
     }
 
     /**
+     * Right-click the last chat message to open its context menu, then click the item
+     * whose span text matches itemText.
+     * @param {string} itemText - exact trimmed text of the span inside li.context-item
+     */
+    async rightClickLastChatMessage(itemText) {
+        const messages = await this.page.$$(".chat-scroll li.chat-message")
+        const last = messages[messages.length - 1]
+        if (!last) throw new Error("rightClickLastChatMessage: no chat messages found")
+        await last.click({ button: "right" })
+        await this._pause()
+
+        await this.page.waitForSelector("nav#context-menu", { visible: true })
+
+        await this.page.evaluate((text) => {
+            const items = document.querySelectorAll("nav#context-menu li.context-item")
+            const item = Array.from(items).find(li => {
+                const span = li.querySelector("span")
+                return span && span.textContent.trim() === text
+            })
+            if (!item) throw new Error(`rightClickLastChatMessage: context item "${text}" not found`)
+            item.click()
+        }, itemText)
+        await this._pause()
+    }
+
+    /**
      * Click an element inside the most recent chat message whose text content matches.
      * @param {string} text - exact trimmed text to match
      */
