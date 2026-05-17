@@ -5,11 +5,15 @@
   "license": "GPL-3.0-or-later",
   "type": "module",
   "main": "src/framework.mjs",
+  "exports": {
+    ".": "./src/framework.mjs",
+    "./setup": "./src/setup.mjs"
+  },
   "scripts": {
     "setup": "node src/setup.mjs",
     "test": "echo \"Import FoundryTestFramework from './src/framework.mjs' in your test runner. Run 'npm run setup' first.\""
   },
   "dependencies": {
-    "puppeteer": "^22.0.0"
+    "puppeteer": "^24.38.0"
   }
 }

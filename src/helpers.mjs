@@ -8,11 +8,11 @@ import { join } from "node:path"
  * @param {number} timeout - milliseconds
  * @param {number} interval - poll interval in milliseconds
  */
-export async function waitForCondition(page, fn, timeout = 10000, interval = 500) {
+export async function waitForCondition(page, fn, timeout = 10000, interval = 500, ...args) {
     const deadline = Date.now() + timeout
     while (Date.now() < deadline) {
         try {
-            const result = await page.evaluate(fn)
+            const result = await page.evaluate(fn, ...args)
             if (result) return result
         } catch {
             // page may not be ready yet

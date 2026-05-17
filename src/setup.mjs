@@ -2,7 +2,7 @@ import { access, mkdir, cp } from "node:fs/promises"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 
-const REQUIRED_CONFIG_FIELDS = ["foundryLicenseKey", "sourceDataPath", "testDataPath", "foundryNodePath", "diceOverrideExtensionPath"]
+const REQUIRED_CONFIG_FIELDS = ["sourceDataPath", "testDataPath", "foundryNodePath", "diceOverrideExtensionPath"]
 
 async function pathExists(p) {
     try { await access(p); return true } catch { return false }
@@ -29,40 +29,68 @@ async function validateExtension(config) {
     console.log("  dice-override extension present.")
 }
 
+async function copyLicense(config) {
+    const src = join(config.sourceDataPath, "Config", "license.json")
+    if (!(await pathExists(src))) throw new Error(`license.json not found at: ${src}`)
+    const destDir = join(config.testDataPath, "Config")
+    await mkdir(destDir, { recursive: true })
+    await cp(src, join(destDir, "license.json"))
+    console.log("  Copied license.json")
+}
+
 async function createTestDataFolder(config) {
     await mkdir(config.testDataPath, { recursive: true })
     console.log(`  Test data folder: ${config.testDataPath}`)
 
+    await copyLicense(config)
+
+    const systems = config.systemsToCopy ?? []
     const modules = config.modulesToCopy ?? []
-    const worlds = config.worldsToCopy ?? []
+    const worlds  = config.worldsToCopy ?? []
+
+    for (const id of systems) {
+        const src = join(config.sourceDataPath, "Data", "systems", id)
+        const dest = join(config.testDataPath, "Data", "systems", id)
+        if (!(await pathExists(src))) {
+            console.warn(`  WARNING: system "${id}" not found at ${src} — skipping`)
+            continue
+        }
+        await mkdir(join(config.testDataPath, "Data", "systems"), { recursive: true })
+        await cp(src, dest, { recursive: true })
+        console.log(`  Copied system: ${id}`)
+    }
 
     for (const id of modules) {
         const src = join(config.sourceDataPath, "Data", "modules", id)
-        const dest = join(config.testDataPath, "modules", id)
+        const dest = join(config.testDataPath, "Data", "modules", id)
         if (!(await pathExists(src))) {
             console.warn(`  WARNING: module "${id}" not found at ${src} — skipping`)
             continue
         }
-        await mkdir(join(config.testDataPath, "modules"), { recursive: true })
+        await mkdir(join(config.testDataPath, "Data", "modules"), { recursive: true })
         await cp(src, dest, { recursive: true })
         console.log(`  Copied module: ${id}`)
     }
 
     for (const id of worlds) {
         const src = join(config.sourceDataPath, "Data", "worlds", id)
-        const dest = join(config.testDataPath, "worlds", id)
+        const dest = join(config.testDataPath, "Data", "worlds", id)
         if (!(await pathExists(src))) {
             console.warn(`  WARNING: world "${id}" not found at ${src} — skipping`)
             continue
         }
-        await mkdir(join(config.testDataPath, "worlds"), { recursive: true })
+        await mkdir(join(config.testDataPath, "Data", "worlds"), { recursive: true })
         await cp(src, dest, { recursive: true })
         console.log(`  Copied world: ${id}`)
     }
+}
 
-    if (modules.length === 0 && worlds.length === 0) {
-        console.log("  No modules or worlds configured to copy (see modulesToCopy / worldsToCopy in config.mjs).")
-    }
+export async function runSetup(config) {
+    console.log("Setting up foundryvtt-test-framework...")
+    await validateConfig(config)
+    await validateExtension(config)
+    await createTestDataFolder(config)
+    console.log("\nSetup complete. You can now use FoundryTestFramework.")
 }
 
 async function main() {
@@ -81,17 +109,14 @@ async function main() {
         process.exit(1)
     }
 
-    console.log("Setting up foundryvtt-test-framework...")
-
     try {
-        await validateConfig(config)
-        await validateExtension(config)
-        await createTestDataFolder(config)
-        console.log("\nSetup complete. You can now use FoundryTestFramework.")
+        await runSetup(config)
     } catch (err) {
         console.error(`\nSetup failed: ${err.message}`)
         process.exit(1)
     }
 }
 
-main()
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+    main()
+}
