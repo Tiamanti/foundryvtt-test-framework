@@ -80,11 +80,13 @@ export class FoundryTestFramework {
     /**
      * Poll a browser-side predicate until it returns a truthy value, then return that value.
      * Return a plain serializable object from fn — do not return Foundry Document instances.
+     * Extra args are forwarded into the page context so tests don't need window globals to pass UUIDs.
      * @param {Function} fn - evaluated in Foundry context; must return truthy to resolve
      * @param {number} timeout
+     * @param {...any} args - serializable args passed through to fn in the page
      */
-    async waitFor(fn, timeout = 10000) {
-        const result = await waitForCondition(this.page, fn, timeout)
+    async waitFor(fn, timeout = 10000, ...args) {
+        const result = await waitForCondition(this.page, fn, timeout, 500, ...args)
         if (result === null || result === undefined) throw new Error(`waitFor: condition not met within ${timeout}ms`)
         return result
     }
