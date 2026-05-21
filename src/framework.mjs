@@ -91,6 +91,37 @@ export class FoundryTestFramework {
         return result
     }
 
+    /**
+     * Wait until at least one element matching `selector` exists in the page DOM.
+     * Thin wrapper around waitFor for the most common "does this exist yet?" check.
+     * @param {string} selector
+     * @param {number} timeout
+     */
+    async waitForSelector(selector, timeout = 10000) {
+        await this.waitFor((sel) => document.querySelector(sel) ? true : null, timeout, selector)
+    }
+
+    /**
+     * Wait until no element matches `selector`.
+     * @param {string} selector
+     * @param {number} timeout
+     */
+    async waitForNoSelector(selector, timeout = 10000) {
+        await this.waitFor((sel) => !document.querySelector(sel) ? true : null, timeout, selector)
+    }
+
+    /**
+     * Wait until at least `count` elements match `selector`.
+     * @param {string} selector
+     * @param {number} count - minimum number of matching elements
+     * @param {number} timeout
+     */
+    async waitForSelectorCount(selector, count, timeout = 10000) {
+        await this.waitFor((sel, n) =>
+            document.querySelectorAll(sel).length >= n ? true : null
+        , timeout, selector, count)
+    }
+
     /** Wait for game.ready === true (Foundry fully initialized). */
     async waitForFoundryReady() {
         await waitForCondition(
