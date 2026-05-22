@@ -1,15 +1,33 @@
 import { spawn } from "node:child_process"
-import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { request } from "node:http"
-import puppeteer from "puppeteer"
-import { waitForCondition, takeScreenshot } from "./helpers.mjs"
+import { chromium } from "playwright"
+import { waitForCondition, takeScreenshot, buildEvaluator } from "./helpers.mjs"
 
+/**
+ * Playwright-based test framework for Foundry VTT.
+ *
+ * Lifecycle:
+ *   - Spawn the Foundry node server (`main.js --dataPath=...`)
+ *   - Launch a persistent Chromium context (extensions only work in persistent mode)
+ *     with the dice-override extension loaded
+ *   - Navigate to localhost, log in as the configured user, wait for game.ready
+ *
+ * The class exposes the same surface as the previous puppeteer-based version
+ * (clickInLastChatMessage, waitFor, executeInFoundry, queueDiceOverride, ...)
+ * so test helpers don't need to change.
+ *
+ * When driven by `@playwright/test`, attach the framework's `page` to the test
+ * by calling `fw.attachPage(testInfo.page)` — that lets the runner capture
+ * traces/screenshots/videos for the page the test actually drives. For
+ * standalone usage (no Playwright runner), `fw.page` is the page the framework
+ * created.
+ */
 export class FoundryTestFramework {
     constructor(config) {
         this.config = config
         this.serverProcess = null
-        this.browser = null
+        this.context = null
         this.page = null
     }
 
@@ -26,8 +44,8 @@ export class FoundryTestFramework {
     }
 
     async stop() {
-        await this.browser?.close().catch(() => {})
-        this.browser = null
+        await this.context?.close().catch(() => {})
+        this.context = null
         this.page = null
 
         if (this.serverProcess) {
@@ -40,50 +58,46 @@ export class FoundryTestFramework {
     // Test helpers
     // -------------------------------------------------------------------------
 
-    /** Execute fn in the Foundry page context. Passes extra args as JSON-serializable values. */
+    /** Execute fn in the Foundry page context. Variadic args are spread back into fn inside the page. */
     async executeInFoundry(fn, ...args) {
-        return this.page.evaluate(fn, ...args)
+        return buildEvaluator(fn, args)(this.page)
     }
 
     /**
      * Push a dice override onto the extension queue.
      * The next roll matching faces/count will return the given value instead of a random result.
-     * @param {number} faces - die type (e.g. 6 for d6, 100 for d100)
-     * @param {number} count - number of dice (e.g. 2 for 2d6), or null to match any count
-     * @param {number} value - desired total
+     * @param {number} faces
+     * @param {number} count
+     * @param {number} value
      */
     async queueDiceOverride(faces, count, value) {
-        await this.page.evaluate((f, c, v) => {
+        await this.page.evaluate(({ f, c, v }) => {
             window.__diceOverrideQueue.push({ faces: f, number: c, value: v, consumed: false })
-        }, faces, count, value)
+        }, { f: faces, c: count, v: value })
     }
 
     /**
-     * Wait until a chat message matching matcher appears, then return it.
-     * matcher receives a plain object with message data.
-     * @param {Function} matcher - serializable function evaluated in Foundry context
-     * @param {number} timeout
+     * Wait until a chat message matching matcher appears.
+     * matcher is serialized to a string and reconstructed in the page.
      */
     async waitForChatMessage(matcher, timeout = 10000) {
         const matcherStr = matcher.toString()
         await waitForCondition(
             this.page,
-            new Function(`
-                const matcher = ${matcherStr};
-                const messages = game.messages?.contents ?? [];
-                return messages.some(m => matcher(m)) ? true : null;
-            `),
-            timeout
+            ({ matcherStr }) => {
+                const matcher = (0, eval)("(" + matcherStr + ")")
+                const messages = game.messages?.contents ?? []
+                return messages.some(m => matcher(m)) ? true : null
+            },
+            timeout,
+            500,
+            { matcherStr }
         )
     }
 
     /**
      * Poll a browser-side predicate until it returns a truthy value, then return that value.
-     * Return a plain serializable object from fn — do not return Foundry Document instances.
-     * Extra args are forwarded into the page context so tests don't need window globals to pass UUIDs.
-     * @param {Function} fn - evaluated in Foundry context; must return truthy to resolve
-     * @param {number} timeout
-     * @param {...any} args - serializable args passed through to fn in the page
+     * Extra args (after timeout) are forwarded into the page context.
      */
     async waitFor(fn, timeout = 10000, ...args) {
         const result = await waitForCondition(this.page, fn, timeout, 500, ...args)
@@ -91,38 +105,22 @@ export class FoundryTestFramework {
         return result
     }
 
-    /**
-     * Wait until at least one element matching `selector` exists in the page DOM.
-     * Thin wrapper around waitFor for the most common "does this exist yet?" check.
-     * @param {string} selector
-     * @param {number} timeout
-     */
     async waitForSelector(selector, timeout = 10000) {
         await this.waitFor((sel) => document.querySelector(sel) ? true : null, timeout, selector)
     }
 
-    /**
-     * Wait until no element matches `selector`.
-     * @param {string} selector
-     * @param {number} timeout
-     */
     async waitForNoSelector(selector, timeout = 10000) {
         await this.waitFor((sel) => !document.querySelector(sel) ? true : null, timeout, selector)
     }
 
-    /**
-     * Wait until at least `count` elements match `selector`.
-     * @param {string} selector
-     * @param {number} count - minimum number of matching elements
-     * @param {number} timeout
-     */
     async waitForSelectorCount(selector, count, timeout = 10000) {
-        await this.waitFor((sel, n) =>
-            document.querySelectorAll(sel).length >= n ? true : null
-        , timeout, selector, count)
+        await this.waitFor(
+            ({ sel, n }) => document.querySelectorAll(sel).length >= n ? true : null,
+            timeout,
+            { sel: selector, n: count }
+        )
     }
 
-    /** Wait for game.ready === true (Foundry fully initialized). */
     async waitForFoundryReady() {
         await waitForCondition(
             this.page,
@@ -137,51 +135,44 @@ export class FoundryTestFramework {
         return takeScreenshot(this.page, this.config.testDataPath, filename)
     }
 
-    /** Clear the chat log by clicking the clear button and confirming the dialog. */
     async clearChat() {
         const chatSel = '[aria-label="Chat Messages"]'
-        const chatBtn = await this.page.waitForSelector(chatSel, { visible: true })
-        await chatBtn.click().catch(e => { throw new Error(`clearChat: click failed on "${chatSel}": ${e.message}`) })
+        await this.page.waitForSelector(chatSel, { state: "visible" })
+        await this.page.click(chatSel)
         await this._pause()
 
-        await this.page.waitForSelector('[aria-label="Clear Chat Log"]', { visible: true })
+        await this.page.waitForSelector('[aria-label="Clear Chat Log"]', { state: "visible" })
         await this.page.evaluate(() => document.querySelector('[aria-label="Clear Chat Log"]').click())
         await this._pause()
 
         const confirmSel = 'button[type="submit"][data-action="yes"]'
-        const confirmBtn = await this.page.waitForSelector(confirmSel, { visible: true })
-        await confirmBtn.click().catch(e => { throw new Error(`clearChat: click failed on "${confirmSel}": ${e.message}`) })
+        await this.page.waitForSelector(confirmSel, { state: "visible" })
+        await this.page.click(confirmSel)
         await this._pause()
     }
 
-    /** Wait for a Foundry application dialog to appear and click its submit button. */
     async submitDialog() {
         const sel = "footer.form-footer button[type='submit']"
-        const btn = await this.page.waitForSelector(sel, { visible: true })
-        await btn.click().catch(e => { throw new Error(`submitDialog: click failed on "${sel}": ${e.message}`) })
+        await this.page.waitForSelector(sel, { state: "visible" })
+        await this.page.click(sel)
         await this._pause()
     }
 
-    /** Open the chat tab, type a command, and press Enter to submit. */
     async sendChatCommand(text) {
         const chatSel = '[aria-label="Chat Messages"]'
-        const chatBtn = await this.page.waitForSelector(chatSel, { visible: true })
-        await chatBtn.click().catch(e => { throw new Error(`sendChatCommand: click failed on "${chatSel}": ${e.message}`) })
+        await this.page.waitForSelector(chatSel, { state: "visible" })
+        await this.page.click(chatSel)
         await this._pause()
 
         const editorSel = ".editor-container div[contenteditable='true']"
-        const editor = await this.page.waitForSelector(editorSel, { visible: true })
-        await editor.click().catch(e => { throw new Error(`sendChatCommand: click failed on "${editorSel}": ${e.message}`) })
+        await this.page.waitForSelector(editorSel, { state: "visible" })
+        await this.page.click(editorSel)
         await this._pause()
 
         await this.page.keyboard.type(text)
         await this.page.keyboard.press("Enter")
     }
 
-    /**
-     * Click a button inside the most recent chat message matching a CSS selector.
-     * @param {string} selector - scoped within the last li.chat-message
-     */
     async clickInLastChatMessage(selector) {
         await this.page.evaluate((sel) => {
             const messages = document.querySelectorAll(".chat-scroll li.chat-message")
@@ -194,11 +185,6 @@ export class FoundryTestFramework {
         await this._pause()
     }
 
-    /**
-     * Wait until an element with matching trimmed text appears in the most recent chat message.
-     * @param {string} text - exact trimmed text to match
-     * @param {number} timeout
-     */
     async waitForTextInLastChatMessage(text, timeout = 10000) {
         await waitForCondition(
             this.page,
@@ -214,16 +200,10 @@ export class FoundryTestFramework {
         )
     }
 
-    /**
-     * Wait until text appears inside the last chat message that contains a specific card element.
-     * @param {string} cardSelector - CSS selector identifying the card within .message-content
-     * @param {string} text - exact trimmed text to match anywhere inside the card
-     * @param {number} timeout
-     */
     async waitForTextInLastChatMessageContaining(cardSelector, text, timeout = 10000) {
         await waitForCondition(
             this.page,
-            (cardSel, text) => {
+            ({ cardSel, text }) => {
                 const messages = Array.from(document.querySelectorAll(".chat-scroll li.chat-message"))
                 const cardMsg = messages.findLast(m => m.querySelector(".message-content " + cardSel))
                 if (!cardMsg) return null
@@ -232,25 +212,12 @@ export class FoundryTestFramework {
             },
             timeout,
             500,
-            cardSelector,
-            text
+            { cardSel: cardSelector, text }
         )
     }
 
-    /**
-     * Click an element inside the last chat message that contains a specific card element.
-     * @param {string} cardSelector - CSS selector identifying the card within .message-content
-     * @param {string} selector - scoped within the matched card
-     */
-    /**
-     * Set the value of an input inside the last chat message that contains a specific card element
-     * and dispatch a change event.
-     * @param {string} cardSelector - CSS selector identifying the card within .message-content
-     * @param {string} inputSelector - scoped within the matched card
-     * @param {string} value
-     */
     async writeInLastChatMessageContaining(cardSelector, inputSelector, value) {
-        await this.page.evaluate((cardSel, inputSel, value) => {
+        await this.page.evaluate(({ cardSel, inputSel, value }) => {
             const messages = Array.from(document.querySelectorAll(".chat-scroll li.chat-message"))
             const cardMsg = messages.findLast(m => m.querySelector(".message-content " + cardSel))
             if (!cardMsg) throw new Error(`writeInLastChatMessageContaining: no message with "${cardSel}" found in chat`)
@@ -258,34 +225,29 @@ export class FoundryTestFramework {
             if (!input) throw new Error(`writeInLastChatMessageContaining: "${inputSel}" not found inside "${cardSel}"`)
             input.value = value
             input.dispatchEvent(new Event("change", { bubbles: true }))
-        }, cardSelector, inputSelector, value)
+        }, { cardSel: cardSelector, inputSel: inputSelector, value })
     }
 
     async clickInLastChatMessageContaining(cardSelector, selector) {
-        await this.page.evaluate((cardSel, sel) => {
+        await this.page.evaluate(({ cardSel, sel }) => {
             const messages = Array.from(document.querySelectorAll(".chat-scroll li.chat-message"))
             const cardMsg = messages.findLast(m => m.querySelector(".message-content " + cardSel))
             if (!cardMsg) throw new Error(`clickInLastChatMessageContaining: no message with "${cardSel}" found in chat`)
             const btn = cardMsg.querySelector(".message-content " + cardSel + " " + sel)
             if (!btn) throw new Error(`clickInLastChatMessageContaining: "${sel}" not found inside "${cardSel}"`)
             btn.click()
-        }, cardSelector, selector)
+        }, { cardSel: cardSelector, sel: selector })
         await this._pause()
     }
 
-    /**
-     * Right-click the last chat message to open its context menu, then click the item
-     * whose span text matches itemText.
-     * @param {string} itemText - exact trimmed text of the span inside li.context-item
-     */
     async rightClickLastChatMessage(itemText) {
-        const messages = await this.page.$$(".chat-scroll li.chat-message")
+        const messages = await this.page.locator(".chat-scroll li.chat-message").all()
         const last = messages[messages.length - 1]
         if (!last) throw new Error("rightClickLastChatMessage: no chat messages found")
         await last.click({ button: "right" })
         await this._pause()
 
-        await this.page.waitForSelector("nav#context-menu", { visible: true })
+        await this.page.waitForSelector("nav#context-menu", { state: "visible" })
 
         await this.page.evaluate((text) => {
             const items = document.querySelectorAll("nav#context-menu li.context-item")
@@ -299,10 +261,6 @@ export class FoundryTestFramework {
         await this._pause()
     }
 
-    /**
-     * Click an element inside the most recent chat message whose text content matches.
-     * @param {string} text - exact trimmed text to match
-     */
     async clickInLastChatMessageByText(text) {
         await this.page.evaluate((text) => {
             const messages = document.querySelectorAll(".chat-scroll li.chat-message")
@@ -315,11 +273,6 @@ export class FoundryTestFramework {
         await this._pause()
     }
 
-    /**
-     * Target tokens on the active scene by display name.
-     * Clears existing targets first.
-     * @param {string[]} names - token display names, e.g. ["Thief", "Guard 1"]
-     */
     async selectTokensByName(names) {
         const missing = await this.page.evaluate((names) => {
             const tokens = canvas.tokens.objects.children
@@ -334,11 +287,6 @@ export class FoundryTestFramework {
         if (missing.length) throw new Error(`selectTokensByName: tokens not found on scene: ${missing.join(", ")}`)
     }
 
-    /**
-     * Find a token by display name on the active scene and return its actor as a plain object.
-     * @param {string} name - token display name
-     * @returns {{ tokenUuid: string, actorUuid: string, skills: Record<string, number> }}
-     */
     async getActorFromTokenByName(name) {
         return this.page.evaluate((name) => {
             const token = canvas.tokens.objects.children.find(t => t.name === name)
@@ -402,13 +350,15 @@ export class FoundryTestFramework {
         const chromeProfilePath = fileURLToPath(new URL("../chrome-profile", import.meta.url))
 
         console.log("[foundryvtt-test-framework] Launching browser...")
-        this.browser = await puppeteer.launch({
-            headless: headless ?? false,
-            defaultViewport: null,
+        this.context = await chromium.launchPersistentContext(chromeProfilePath, {
+            // Chromium extensions only load in headed mode under a persistent context.
+            // If the caller asks for headless, Playwright supports the new `--headless=new`
+            // channel which does load extensions; expose it via headless: "new".
+            headless: headless === true ? "new" : false,
+            viewport: null,
             args: [
-                `--load-extension=${diceOverrideExtensionPath}`,
                 `--disable-extensions-except=${diceOverrideExtensionPath}`,
-                `--user-data-dir=${chromeProfilePath}`,
+                `--load-extension=${diceOverrideExtensionPath}`,
                 "--window-size=1920,1080",
             ],
         })
@@ -416,12 +366,12 @@ export class FoundryTestFramework {
 
     async _navigateAndWait() {
         const port = this.config.foundryServerPort ?? 30000
-        const pages = await this.browser.pages()
+        const pages = this.context.pages()
         for (const p of pages.slice(1)) await p.close().catch(() => {})
-        this.page = pages[0] ?? await this.browser.newPage()
+        this.page = pages[0] ?? await this.context.newPage()
 
         console.log("[foundryvtt-test-framework] Navigating to Foundry...")
-        await this.page.goto(`http://localhost:${port}`, { waitUntil: "networkidle2" })
+        await this.page.goto(`http://localhost:${port}`, { waitUntil: "networkidle" })
         await this._login()
         await this.waitForFoundryReady()
         console.log("[foundryvtt-test-framework] Foundry ready.")
@@ -430,8 +380,9 @@ export class FoundryTestFramework {
     async _login() {
         const loginUser = this.config.loginUser ?? "Gamemaster"
 
-        const select = await this.page.waitForSelector('select[name="userid"]', { timeout: 10000 }).catch(() => null)
-        if (!select) {
+        const hasLoginForm = await this.page.locator('select[name="userid"]').count()
+            .then(c => c > 0, () => false)
+        if (!hasLoginForm) {
             console.log("[foundryvtt-test-framework] No login form — assuming session already active.")
             return
         }

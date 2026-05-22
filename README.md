@@ -1,6 +1,6 @@
 # foundryvtt-test-framework
 
-End-to-end test framework for Foundry VTT modules and systems. Runs a live Foundry instance, controls it via Puppeteer, and uses a bundled Chrome extension to force dice rolls to specific values for fully reproducible tests.
+End-to-end test framework for Foundry VTT modules and systems. Runs a live Foundry instance, controls it via Playwright (`chromium.launchPersistentContext`), and uses a bundled Chrome extension to force dice rolls to specific values for fully reproducible tests.
 
 > **Developer-local only.** Tests require a local Foundry installation and cannot run in CI.
 
@@ -147,7 +147,7 @@ await fw.stop()
 | `foundryServerPort` | No | `30000` | Port the Foundry server listens on |
 | `world` | No | — | World ID to auto-load on startup (`--world=` flag passed to Foundry) |
 | `loginUser` | No | `"Gamemaster"` | Display name of the Foundry user to log in as on the join screen |
-| `headless` | No | `false` | Run Chrome headless (useful for scripted runs) |
+| `headless` | No | `false` | Run Chrome headless. Playwright requires `headless: "new"` for extension support; passing `true` is mapped to that. |
 | `serverReadyTimeout` | No | `30000` | Ms to wait for the HTTP server to respond |
 | `foundryReadyTimeout` | No | `60000` | Ms to wait for `game.ready` after page load |
 

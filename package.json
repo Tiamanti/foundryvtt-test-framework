@@ -1,7 +1,7 @@
 {
   "name": "foundryvtt-test-framework",
-  "version": "1.0.0",
-  "description": "End-to-end test framework for Foundry VTT modules and systems.",
+  "version": "2.0.0",
+  "description": "End-to-end test framework for Foundry VTT modules and systems (Playwright-based).",
   "license": "GPL-3.0-or-later",
   "type": "module",
   "main": "src/framework.mjs",
@@ -14,6 +14,6 @@
     "test": "echo \"Import FoundryTestFramework from './src/framework.mjs' in your test runner. Run 'npm run setup' first.\""
   },
   "dependencies": {
-    "puppeteer": "^24.38.0"
+    "playwright": "^1.49.0"
   }
 }
