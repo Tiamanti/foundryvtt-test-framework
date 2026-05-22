@@ -267,6 +267,25 @@ export class FoundryTestFramework {
         await this._pause()
     }
 
+    async rightClickLastChatMessageContaining(containerSel, itemText) {
+        const locator = this.page.locator(".chat-scroll li.chat-message").filter({ has: this.page.locator(".message-content " + containerSel) }).last()
+        await locator.click({ button: "right" })
+        await this._pause()
+
+        await this.page.waitForSelector("nav#context-menu", { state: "visible" })
+
+        await this.page.evaluate((text) => {
+            const items = document.querySelectorAll("nav#context-menu li.context-item")
+            const item = Array.from(items).find(li => {
+                const span = li.querySelector("span")
+                return span && span.textContent.trim() === text
+            })
+            if (!item) throw new Error(`rightClickLastChatMessageContaining: context item "${text}" not found`)
+            item.click()
+        }, itemText)
+        await this._pause()
+    }
+
     async clickInLastChatMessageByText(text) {
         await this.page.evaluate((text) => {
             const messages = document.querySelectorAll(".chat-scroll li.chat-message")
