@@ -36,7 +36,13 @@ export class FoundryTestFramework {
     // -------------------------------------------------------------------------
 
     async start() {
-        await this._spawnServer()
+        // When `config.serverAlreadyRunning` is true (typically set by a Playwright
+        // globalSetup that spawned Foundry once for the whole run), skip the
+        // server spawn — just verify the server is reachable and proceed to the
+        // browser. This keeps Foundry alive across worker restarts.
+        if (!this.config.serverAlreadyRunning) {
+            await this._spawnServer()
+        }
         await this._waitForServerReady()
         await this._launchBrowser()
         await this._navigateAndWait()
@@ -48,7 +54,7 @@ export class FoundryTestFramework {
         this.context = null
         this.page = null
 
-        if (this.serverProcess) {
+        if (this.serverProcess && !this.config.serverAlreadyRunning) {
             this.serverProcess.kill()
             this.serverProcess = null
         }
@@ -294,6 +300,56 @@ export class FoundryTestFramework {
             if (!token.actor) throw new Error(`getActorFromTokenByName: token "${name}" has no actor`)
             return { tokenUuid: token.document.uuid, ...token.actor.toObject() }
         }, name)
+    }
+
+    // -------------------------------------------------------------------------
+    // Static helpers — usable from Playwright globalSetup so the Foundry
+    // server can outlive worker restarts.
+    // -------------------------------------------------------------------------
+
+    /**
+     * Spawn a Foundry node server and wait until it responds on HTTP.
+     * Returns an opaque handle; pass it to `FoundryTestFramework.stopServer`.
+     */
+    static async startServer(config) {
+        const { foundryNodePath, testDataPath, foundryServerPort = 30000, world } = config
+        const args = ["main.js", `--dataPath=${testDataPath}`]
+        if (foundryServerPort !== 30000) args.push(`--port=${foundryServerPort}`)
+        if (world) args.push(`--world=${world}`)
+
+        console.log(`[foundryvtt-test-framework] Starting Foundry server on port ${foundryServerPort}...`)
+        const proc = spawn("node", args, {
+            cwd: foundryNodePath,
+            stdio: ["ignore", "pipe", "pipe"],
+        })
+        proc.stdout.on("data", d => process.stdout.write(`[foundry] ${d}`))
+        proc.stderr.on("data", d => process.stderr.write(`[foundry] ${d}`))
+        proc.on("error", err => { throw new Error(`Foundry server failed to start: ${err.message}`) })
+
+        const timeout = config.serverReadyTimeout ?? 30000
+        const deadline = Date.now() + timeout
+        while (Date.now() < deadline) {
+            const ok = await new Promise(resolve => {
+                const req = request({ host: "localhost", port: foundryServerPort, method: "HEAD", path: "/" }, res => {
+                    resolve(res.statusCode < 500)
+                })
+                req.on("error", () => resolve(false))
+                req.end()
+            })
+            if (ok) {
+                console.log("[foundryvtt-test-framework] Foundry server ready.")
+                return { proc, port: foundryServerPort }
+            }
+            await new Promise(r => setTimeout(r, 500))
+        }
+        proc.kill()
+        throw new Error(`Foundry server did not become ready within ${timeout}ms`)
+    }
+
+    /** Stop a server previously started by `startServer`. */
+    static async stopServer(handle) {
+        if (!handle?.proc) return
+        handle.proc.kill()
     }
 
     // -------------------------------------------------------------------------
