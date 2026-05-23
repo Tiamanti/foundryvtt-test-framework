@@ -5,59 +5,18 @@ import { chromium } from "playwright"
 import { waitForCondition, takeScreenshot, buildEvaluator } from "./helpers.mjs"
 
 /**
- * Playwright-based test framework for Foundry VTT.
- *
- * Lifecycle:
- *   - Spawn the Foundry node server (`main.js --dataPath=...`)
- *   - Launch a persistent Chromium context (extensions only work in persistent mode)
- *     with the dice-override extension loaded
- *   - Navigate to localhost, log in as the configured user, wait for game.ready
- *
- * The class exposes the same surface as the previous puppeteer-based version
- * (clickInLastChatMessage, waitFor, executeInFoundry, queueDiceOverride, ...)
- * so test helpers don't need to change.
- *
- * When driven by `@playwright/test`, attach the framework's `page` to the test
- * by calling `fw.attachPage(testInfo.page)` — that lets the runner capture
- * traces/screenshots/videos for the page the test actually drives. For
- * standalone usage (no Playwright runner), `fw.page` is the page the framework
- * created.
+ * All page-bound test helpers, decoupled from the server/browser lifecycle.
+ * Used directly by FoundryTestFramework (via inheritance) and returned by
+ * openAsUser() for secondary browser sessions.
  */
-export class FoundryTestFramework {
-    constructor(config) {
-        this.config = config
-        this.serverProcess = null
-        this.context = null
-        this.page = null
+export class FoundryPageHelper {
+    constructor(page, closeCallback = null) {
+        this.page = page
+        this._closeCallback = closeCallback
     }
 
-    // -------------------------------------------------------------------------
-    // Lifecycle
-    // -------------------------------------------------------------------------
-
-    async start() {
-        // When `config.serverAlreadyRunning` is true (typically set by a Playwright
-        // globalSetup that spawned Foundry once for the whole run), skip the
-        // server spawn — just verify the server is reachable and proceed to the
-        // browser. This keeps Foundry alive across worker restarts.
-        if (!this.config.serverAlreadyRunning) {
-            await this._spawnServer()
-        }
-        await this._waitForServerReady()
-        await this._launchBrowser()
-        await this._navigateAndWait()
-        return this
-    }
-
-    async stop() {
-        await this.context?.close().catch(() => {})
-        this.context = null
-        this.page = null
-
-        if (this.serverProcess && !this.config.serverAlreadyRunning) {
-            this.serverProcess.kill()
-            this.serverProcess = null
-        }
+    async close() {
+        await this._closeCallback?.()
     }
 
     // -------------------------------------------------------------------------
@@ -131,14 +90,21 @@ export class FoundryTestFramework {
         await waitForCondition(
             this.page,
             () => typeof game !== "undefined" && game?.ready === true,
-            this.config.foundryReadyTimeout ?? 60000,
+            this.config?.foundryReadyTimeout ?? 60000,
             1000
         )
     }
 
     /** Take a debug screenshot saved to test-data/screenshots/<filename>. */
     async screenshot(filename) {
-        return takeScreenshot(this.page, this.config.testDataPath, filename)
+        return takeScreenshot(this.page, this.config?.testDataPath, filename)
+    }
+
+    async openChat() {
+        const chatSel = '[aria-label="Chat Messages"]'
+        await this.page.waitForSelector(chatSel, { state: "visible" })
+        await this.page.click(chatSel)
+        await this._pause()
     }
 
     async clearChat() {
@@ -247,7 +213,7 @@ export class FoundryTestFramework {
     }
 
     async rightClickLastChatMessage(itemText) {
-        const messages = await this.page.locator(".chat-scroll li.chat-message").all()
+        const messages = await this.page.locator(".chat-sidebar .chat-scroll li.chat-message").all()
         const last = messages[messages.length - 1]
         if (!last) throw new Error("rightClickLastChatMessage: no chat messages found")
         await last.click({ button: "right" })
@@ -322,6 +288,143 @@ export class FoundryTestFramework {
     }
 
     // -------------------------------------------------------------------------
+    // Internal
+    // -------------------------------------------------------------------------
+
+    _pause(ms = 100) {
+        return new Promise(r => setTimeout(r, ms))
+    }
+}
+
+/**
+ * Playwright-based test framework for Foundry VTT.
+ *
+ * Lifecycle:
+ *   - Spawn the Foundry node server (`main.js --dataPath=...`)
+ *   - Launch a persistent Chromium context (extensions only work in persistent mode)
+ *     with the dice-override extension loaded
+ *   - Navigate to localhost, log in as the configured user, wait for game.ready
+ *
+ * The class exposes the same surface as the previous puppeteer-based version
+ * (clickInLastChatMessage, waitFor, executeInFoundry, queueDiceOverride, ...)
+ * so test helpers don't need to change.
+ *
+ * When driven by `@playwright/test`, attach the framework's `page` to the test
+ * by calling `fw.attachPage(testInfo.page)` — that lets the runner capture
+ * traces/screenshots/videos for the page the test actually drives. For
+ * standalone usage (no Playwright runner), `fw.page` is the page the framework
+ * created.
+ */
+export class FoundryTestFramework extends FoundryPageHelper {
+    constructor(config) {
+        super(null)
+        this.config = config
+        this.serverProcess = null
+        this.context = null
+    }
+
+    // -------------------------------------------------------------------------
+    // Lifecycle
+    // -------------------------------------------------------------------------
+
+    async start() {
+        // When `config.serverAlreadyRunning` is true (typically set by a Playwright
+        // globalSetup that spawned Foundry once for the whole run), skip the
+        // server spawn — just verify the server is reachable and proceed to the
+        // browser. This keeps Foundry alive across worker restarts.
+        if (!this.config.serverAlreadyRunning) {
+            await this._spawnServer()
+        }
+        await this._waitForServerReady()
+        await this._launchBrowser()
+        await this._navigateAndWait()
+        return this
+    }
+
+    async stop() {
+        await this.context?.close().catch(() => {})
+        this.context = null
+        this.page = null
+
+        if (this.serverProcess && !this.config.serverAlreadyRunning) {
+            this.serverProcess.kill()
+            this.serverProcess = null
+        }
+    }
+
+    /**
+     * Open a second Foundry session logged in as `userName` in an isolated browser context.
+     *
+     * When `config.diceOverrideExtensionPath` is set the session loads the dice-override
+     * extension via a separate persistent profile (`chrome-profile-player/`) so extension-
+     * dependent features (queueDiceOverride) work. Otherwise a plain headless context is used.
+     *
+     * Returns a FoundryPageHelper with the full helper API plus a `close()` method.
+     *
+     * @param {string} userName - Foundry display name of the user to log in as
+     */
+    async openAsUser(userName) {
+        const port = this.config.foundryServerPort ?? 30000
+        const { diceOverrideExtensionPath, headless } = this.config
+
+        let context, browser = null
+
+        if (diceOverrideExtensionPath) {
+            // Extensions require a persistent context; use a dedicated player profile so
+            // the cookie jar stays isolated from the primary GM session.
+            const playerProfilePath = fileURLToPath(new URL("../chrome-profile-player", import.meta.url))
+            context = await chromium.launchPersistentContext(playerProfilePath, {
+                headless: headless === true ? "new" : false,
+                viewport: null,
+                args: [
+                    `--disable-extensions-except=${diceOverrideExtensionPath}`,
+                    `--load-extension=${diceOverrideExtensionPath}`,
+                ],
+            })
+        } else {
+            browser = await chromium.launch({ headless: true })
+            context = await browser.newContext()
+        }
+
+        // Reuse the first open page (persistent context may already have one).
+        const pages = context.pages()
+        for (const p of pages.slice(1)) await p.close().catch(() => {})
+        const page = pages[0] ?? await context.newPage()
+
+        await page.goto(`http://localhost:${port}`, { waitUntil: "networkidle" })
+
+        const hasLoginForm = await page.locator('select[name="userid"]').count().then(c => c > 0, () => false)
+        if (hasLoginForm) {
+            const found = await page.evaluate((name) => {
+                const sel = document.querySelector('select[name="userid"]')
+                if (!sel) return false
+                const opt = Array.from(sel.options).find(o => o.text === name)
+                if (!opt) return false
+                sel.value = opt.value
+                sel.dispatchEvent(new Event("change", { bubbles: true }))
+                return true
+            }, userName)
+
+            if (!found) throw new Error(`openAsUser: user "${userName}" not found in Foundry login`)
+
+            await page.evaluate(() => {
+                const btn = Array.from(document.querySelectorAll("button"))
+                    .find(b => b.textContent.trim() === "Join Game Session")
+                btn?.click()
+            })
+
+            await new Promise(r => setTimeout(r, 3000))
+        }
+
+        await waitForCondition(page, () => typeof game !== "undefined" && game?.ready === true, 60000, 1000)
+
+        return new FoundryPageHelper(page, async () => {
+            await context.close().catch(() => {})
+            await browser?.close().catch(() => {})
+        })
+    }
+
+    // -------------------------------------------------------------------------
     // Static helpers — usable from Playwright globalSetup so the Foundry
     // server can outlive worker restarts.
     // -------------------------------------------------------------------------
@@ -374,10 +477,6 @@ export class FoundryTestFramework {
     // -------------------------------------------------------------------------
     // Internal
     // -------------------------------------------------------------------------
-
-    _pause(ms = 100) {
-        return new Promise(r => setTimeout(r, ms))
-    }
 
     _spawnServer() {
         const { foundryNodePath, testDataPath, foundryServerPort } = this.config
