@@ -1,4 +1,4 @@
-import { access, mkdir, cp } from "node:fs/promises"
+import { access, mkdir, cp, rm } from "node:fs/promises"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 
@@ -56,6 +56,7 @@ async function createTestDataFolder(config) {
             continue
         }
         await mkdir(join(config.testDataPath, "Data", "systems"), { recursive: true })
+        if (await pathExists(dest)) await rm(dest, { recursive: true })
         await cp(src, dest, { recursive: true })
         console.log(`  Copied system: ${id}`)
     }
@@ -68,6 +69,7 @@ async function createTestDataFolder(config) {
             continue
         }
         await mkdir(join(config.testDataPath, "Data", "modules"), { recursive: true })
+        if (await pathExists(dest)) await rm(dest, { recursive: true })
         await cp(src, dest, { recursive: true })
         console.log(`  Copied module: ${id}`)
     }
@@ -80,6 +82,7 @@ async function createTestDataFolder(config) {
             continue
         }
         await mkdir(join(config.testDataPath, "Data", "worlds"), { recursive: true })
+        if (await pathExists(dest)) await rm(dest, { recursive: true })
         await cp(src, dest, { recursive: true })
         console.log(`  Copied world: ${id}`)
     }
