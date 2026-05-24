@@ -283,7 +283,14 @@ export class FoundryPageHelper {
             const token = canvas.tokens.objects.children.find(t => t.name === name)
             if (!token) throw new Error(`getActorFromTokenByName: token "${name}" not found on scene`)
             if (!token.actor) throw new Error(`getActorFromTokenByName: token "${name}" has no actor`)
-            return { tokenUuid: token.document.uuid, ...token.actor.toObject() }
+            const actor = token.actor
+            const obj = actor.toObject()
+            obj.items = obj.items.map(raw => {
+                const live = actor.items.get(raw._id)
+                if (live?.system?.total !== undefined) raw.system = { ...raw.system, total: live.system.total }
+                return raw
+            })
+            return { tokenUuid: token.document.uuid, ...obj }
         }, name)
     }
 

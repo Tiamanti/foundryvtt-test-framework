@@ -76,3 +76,4 @@ FoundryVTT-Node/
 config.mjs
 test-data/
 chrome-profile/
+chrome-profile-player/
